@@ -1,0 +1,26 @@
+{
+  "name": "safetycase-genlayer",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "esbuild src/errors.ts --format=esm --outfile=tests/.errors.mjs && node tests/errors.test.mjs"
+  },
+  "dependencies": {
+    "genlayer-js": "^1.1.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "viem": "^2.21.53"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "esbuild": "^0.24.0"
+  }
+}
