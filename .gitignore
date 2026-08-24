@@ -1,0 +1,12 @@
+node_modules/
+dist/
+
+.env
+.env.local
+
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+tests/.errors.mjs
+.DS_Store
