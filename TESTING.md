@@ -1,153 +1,234 @@
-# SafetyCase Frontend — Planned Test Matrix
+# SafetyCase — Testing & Runtime Evidence
 
-This file is a plan, not runtime evidence.
+This document separates **observed runtime evidence** from additional regression checks. It does not claim PASS for behavior that was not observed.
+
+## Canonical deployment
+
+```text
+Contract: 0xFbF0a1890e8dAe6907B4DBC9Fbb023A3d13Edd8e
+Network: StudioNet 61999
+Version: 1.1
+Live dApp: https://safety-case-bice.vercel.app/
+Explorer: https://explorer-studio.genlayer.com/address/0xFbF0a1890e8dAe6907B4DBC9Fbb023A3d13Edd8e
+```
 
 ## Local bootstrap
 
-```text
-1. npm install
-2. npm test
-3. npm run build
-4. npm run dev
+```bash
+npm install
+npm test
+npm run build
+npm run dev
 ```
 
-## Empty-registry behavior
+## Observed browser flow — System #1
 
-If `get_config().system_count == 0`:
+### TX1 — Create safety case
 
-```text
-PASS if:
-- shell and live config render;
-- no invalid get_system(1) call is required;
-- Fresh safety case is usable;
-- no RPC error banner appears merely because no system exists.
-```
-
-## Existing-system read
-
-Load a valid system id.
+Purpose:
 
 ```text
-PASS if:
-- purpose, owner and counters match get_system;
-- hazards match get_hazards;
-- mitigation history matches get_system_mitigations;
-- localStorage restores only a valid id for this exact contract address.
+Autonomous treasury agent safety case - e894d20f
 ```
 
-## Create flow / concurrency
-
-Create a fresh demo.
+Hazards:
 
 ```text
-PASS if:
-- one MetaMask write prompt appears;
-- no receipt polling occurs;
-- app resolves the created system by:
-  owner + exact purpose + exact hazard text list;
-- it does not blindly load global system_count;
-- a timeout is neutral and does not claim failure after submission.
+H1: The agent can send an irreversible payment to the wrong recipient.
+H2: The agent can write an API key into diagnostic logs.
 ```
 
-## Owner-only mitigation
-
-With non-owner wallet:
+Observed after finalization:
 
 ```text
-PASS if submit button is disabled and UI explains owner-only rule.
+System #1
+required hazards: 2
+covered: 0
+open: 2
+mitigation attempts: 0
+release: not declared
 ```
 
-With owner wallet:
+**Result: PASS**
+
+The frontend resolved the newly created system by owner + purpose + exact hazard set and loaded the correct workspace.
+
+### TX2 — Weak mitigation for H1
+
+Submitted mitigation:
 
 ```text
-PASS if:
-- OPEN hazard accepts one mitigation submission;
-- pending button blocks double-submit;
-- app waits for hazard attempt_count/status change;
-- verdict/state refreshes after finalization.
+Record every payment in an audit log after the transfer is completed and notify an operator for later review.
 ```
 
-## Covered latch
+Observed verdict/state:
 
 ```text
-PASS if a COVERED hazard disables further mitigation submission.
+SAFETY_GAP
+H1: OPEN
+H1 attempts: 1
+covered: 0/2
+history: 1
 ```
 
-## Exact replay
+**Result: PASS**
 
-Repeat the exact same recent mitigation.
+The mitigation only records/reviews the payment after execution, so it does not prevent the stated hazard.
+
+### TX3 — Strong mitigation for H1
+
+Submitted mitigation:
 
 ```text
-PASS if frontend blocks before MetaMask and explains deterministic no-op.
+Before any irreversible payment is executed, the recipient address must match an approved allowlist entry and the payment must receive a second independent authorization. If either check fails, the transfer is blocked before execution.
 ```
 
-If an old replay is not found in the recent 50-attempt window:
+Observed verdict/state:
 
 ```text
-PASS if timeout text stays neutral:
-"may still be finalizing, or exact replay".
+MITIGATION_SUFFICIENT
+H1: COVERED
+H1 attempts: 2
+covered: 1/2
+history: 2
 ```
 
-## Release gate
+**Result: PASS**
 
-Before all hazards are covered:
+### TX4 — Strong mitigation for H2
+
+Submitted mitigation:
 
 ```text
-PASS if UI blocks mark_release_ready and shows remaining OPEN count.
+Before diagnostic logging occurs, all API keys and other secrets are detected and redacted from log output. Any log entry containing an unredacted secret is blocked from being written.
 ```
 
-After `all_hazards_covered == true`:
+Observed verdict/state:
 
 ```text
-PASS if any connected wallet can invoke mark_release_ready.
+MITIGATION_SUFFICIENT
+H2: COVERED
+H2 attempts: 1
+covered: 2/2
+open: 0
+history: 3
 ```
 
-After `release_ready == true`:
+**Result: PASS**
+
+### TX5 — Declare release readiness
+
+Before TX5, the deterministic gate showed:
 
 ```text
-PASS if button becomes idempotent/disabled.
+2/2 covered
+0 open
+GATE OPEN
 ```
 
-## Vercel
+After `mark_release_ready(1)` finalized:
 
 ```text
-- contract pill must show 0xFbF0...Edd8e, never "—";
-- `/genlayer-rpc` reads must work;
-- blank VITE_CONTRACT_ADDRESS must still fall back safely;
-- refresh/F5 must preserve valid active system;
-- MetaMask write flow must not use direct StudioNet receipt polling.
+READINESS DECLARED
+Release: DECLARED
+2/2 covered
+0 open
+3 mitigation attempts
 ```
 
-## Review-fix regression checks
+**Result: PASS**
 
-### Schema guard
-Point the app at an incompatible/older deployment.
+## Final append-only history
+
+Observed history for System #1:
 
 ```text
-PASS if:
-- app shows a clear SafetyCaseGate v1.1 schema error;
-- create / mitigation / release writes remain disabled;
-- no undefined/NaN coverage state is treated as valid.
+#1 H1 -> SAFETY_GAP
+#2 H1 -> MITIGATION_SUFFICIENT
+#3 H2 -> MITIGATION_SUFFICIENT
 ```
 
-### Fresh create baseline
-Before `create_system`, app must call fresh `get_config()` and use that
-`system_count` as the scan baseline.
+The earlier failed H1 attempt remains visible after H1 is later covered.
 
-### Scan ceiling
-`waitForCreatedSystem` must inspect at most 50 ids after that fresh baseline.
+**Result: PASS**
 
-### Wrong wallet network
-Change MetaMask away from StudioNet after connecting.
+## Live Vercel verification
+
+The production deployment at:
 
 ```text
-PASS if:
-- reads continue through the proxy;
-- a visible warning appears;
-- Switch to StudioNet works;
-- every write still runs ensureStudioChain().
+https://safety-case-bice.vercel.app/
 ```
 
-### Honest scope
-At 100% coverage and after readiness declaration, the gate card must still state
-that declared hazards may be incomplete and implementation is not proven.
+was checked against the same canonical StudioNet contract.
+
+Observed:
+
+```text
+MetaMask connection on StudioNet: PASS
+Live config version 1.1: PASS
+Contract address 0xFbF0...Edd8e: PASS
+Registry read: 1 system onchain
+Load System #1: PASS
+Overview final state: 2/2 + READINESS DECLARED
+Hazards: H1 COVERED, H2 COVERED
+History: 3 append-only attempts
+No undefined/NaN state observed
+```
+
+No extra production write transaction was needed: the full write flow above had already been executed against the same canonical StudioNet contract through the local frontend.
+
+## Frontend behavior verified during the flow
+
+Observed through the successful flow:
+
+- MetaMask writes completed and state refreshed after finalization.
+- No duplicate write was required.
+- The app loaded the exact created System #1.
+- Covered hazards disabled further mitigation submission.
+- Release remained unavailable until 100% declared-hazard coverage.
+- `READINESS DECLARED` wording remained distinct from a real-world safety claim.
+- The live deployment could read StudioNet through `/genlayer-rpc`.
+
+## Additional regression checks
+
+These remain useful when changing frontend or contract code:
+
+### Wrong-chain handling
+
+Switch MetaMask away from StudioNet.
+
+Expected:
+
+```text
+visible wrong-chain warning
+Switch to StudioNet action available
+writes call ensureStudioChain()
+```
+
+### Exact replay
+
+Repeat an exact recent mitigation.
+
+Expected:
+
+```text
+frontend detects recent replay before MetaMask
+contract-level exact replay remains a no-op
+```
+
+### Incompatible schema
+
+Point the frontend at an older/incompatible deployment.
+
+Expected:
+
+```text
+clear v1.1 schema error
+writes disabled
+no undefined/NaN state treated as valid
+```
+
+## Scope note
+
+A successful SafetyCase run proves coverage only for the hazards declared onchain. It does not prove that the declared list is complete or that accepted mitigations were implemented in the real world.

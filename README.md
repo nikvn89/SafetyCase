@@ -1,55 +1,59 @@
-# SafetyCase — GenLayer dApp frontend
+# SafetyCase
 
-SafetyCase is the public dApp for the deployed `SafetyCaseGate v1.1`
-Intelligent Contract.
+**Consensus-gated hazard coverage on GenLayer.**
 
-## Canonical contract
+SafetyCase lets a system owner declare an immutable set of hazards, submit one mitigation at a time for GenLayer semantic review, and cross a deterministic release-readiness gate only after every declared hazard is covered.
 
-```text
-0xFbF0a1890e8dAe6907B4DBC9Fbb023A3d13Edd8e
-```
+## Live deployment
 
-Explorer:
+- **dApp:** https://safety-case-bice.vercel.app/
+- **GitHub:** https://github.com/nikvn89/SafetyCase
+- **StudioNet contract:** `0xFbF0a1890e8dAe6907B4DBC9Fbb023A3d13Edd8e`
+- **Explorer:** https://explorer-studio.genlayer.com/address/0xFbF0a1890e8dAe6907B4DBC9Fbb023A3d13Edd8e
+- **Contract version:** `1.1`
+- **Packaged contract SHA-256:** `baeffd4d218ac4075de788a544c70b62ba117514a754ac4f83f8c8d5312f184a`
 
-```text
-https://explorer-studio.genlayer.com/address/0xFbF0a1890e8dAe6907B4DBC9Fbb023A3d13Edd8e
-```
+## Problem
 
-Packaged contract SHA-256:
+A normal smart contract can count hazards and enforce a release gate, but it cannot reliably decide whether free-form mitigation text actually prevents or sufficiently constrains a specific hazard.
 
-```text
-baeffd4d218ac4075de788a544c70b62ba117514a754ac4f83f8c8d5312f184a
-```
+SafetyCase splits the problem into two layers:
 
-## Honest limitation
+1. **GenLayer semantic consensus** classifies a proposed mitigation against one exact hazard.
+2. **Deterministic contract logic** records the result, latches covered hazards, counts coverage, and allows readiness to be declared only when the declared hazard set reaches 100% coverage.
 
-SafetyCase proves coverage only over the immutable hazard set the creator
-**declared onchain**.
+## Semantic verdicts
 
-It does **not** prove:
+The consensus surface is intentionally narrow:
 
 ```text
-- that the declared hazard list is complete;
-- that the system is safe in the real world;
-- that a proposed mitigation has actually been implemented;
-- that external operation matches the submitted text.
+MITIGATION_SUFFICIENT
+SAFETY_GAP
 ```
 
-A `READINESS DECLARED` state therefore means only that every **declared**
-hazard received sufficient consensus-reviewed mitigation coverage and the
-deterministic coverage equality was satisfied.
+A sufficient mitigation irreversibly covers the selected hazard. A safety gap is preserved in append-only history but leaves the hazard open.
 
-## Product flow
+## Deterministic consequence
 
 ```text
 Create immutable hazard set
-→ review one hazard + one mitigation with GenLayer consensus
-→ hazard becomes COVERED or remains OPEN
+→ submit mitigation for one hazard
+→ GenLayer verdict
+→ update append-only attempt history
+→ COVERED latch or remain OPEN
 → repeat until covered_count == required_hazard_count
-→ permissionless deterministic mark_release_ready
+→ mark_release_ready
 ```
 
-## UI structure
+`mark_release_ready` is deterministic and permissionless once the coverage equality is true.
+
+## Multi-tenant design
+
+SafetyCase is not tied to the deployer. Any user can create a fresh safety case with their own wallet and immutable hazard set. Mitigation writes remain owner-only for that safety case, while the final readiness declaration is permissionless after the deterministic gate opens.
+
+## dApp
+
+The frontend is organized into three compact views:
 
 ```text
 Overview
@@ -57,29 +61,50 @@ Hazards
 History
 ```
 
-The frontend intentionally avoids a long single-page flow.
+Key reliability choices:
 
-## Reliability choices
-
-- StudioNet reads go through same-origin `/genlayer-rpc`.
+- StudioNet reads use same-origin `/genlayer-rpc`.
 - Writes use MetaMask.
-- The browser does **not** poll transaction receipts.
-- Writes are confirmed through observable contract-state transitions.
-- Buttons are disabled while a write is pending to prevent double-submit.
-- New-system resolution does not trust the latest global id; it scans newly
-  created ids and matches `owner + exact purpose + exact immutable hazard set`.
-- Empty deployments are handled without calling invalid system ids.
-- `VITE_CONTRACT_ADDRESS` is validated; blank/invalid env values fall back to
-  the canonical deployment.
-- localStorage is namespaced by contract address.
-- Mitigation UI is owner-only, matching the contract.
-- `mark_release_ready` is shown as permissionless but disabled until the
-  deterministic coverage equality is true.
-- Exact mitigation replay is preflight-detected from recent onchain history;
-  if no state change is observed, the timeout message explicitly warns that
-  the submission may have been an exact replay.
+- The browser does not rely on direct transaction-receipt polling.
+- State transitions are used to confirm finalization.
+- Write buttons are protected against double-submit.
+- The frontend validates the expected v1.1 schema before enabling writes.
+- `create_system` refreshes `get_config()` immediately before submission.
+- Newly created systems are resolved by `owner + exact purpose + exact hazard list`, scanning at most 50 new IDs.
+- Wrong-chain state is surfaced with a StudioNet switch action.
+- Exact recent mitigation replay is detected before prompting MetaMask.
 
-## Development
+## Observed runtime evidence
+
+A complete browser flow was executed against the canonical StudioNet contract using **System #1**.
+
+| Step | Observed result |
+| --- | --- |
+| Create system with 2 hazards | `0/2` covered, `2` open |
+| Weak H1 logging mitigation | `SAFETY_GAP`, H1 remained `OPEN` |
+| Strong H1 payment-control mitigation | `MITIGATION_SUFFICIENT`, H1 became `COVERED` |
+| Strong H2 secret-redaction mitigation | `MITIGATION_SUFFICIENT`, H2 became `COVERED` |
+| Deterministic gate | `2/2` covered, `0` open |
+| Declare readiness | `READINESS DECLARED` / `DECLARED` |
+
+The final history contains 3 append-only mitigation attempts: 1 `SAFETY_GAP` and 2 `MITIGATION_SUFFICIENT` verdicts.
+
+The Vercel deployment was also verified to connect MetaMask on StudioNet, load System #1, show both hazards as covered, render the 3-item history, and display the final declared-readiness state.
+
+## Honest limitation
+
+SafetyCase proves coverage only over the immutable hazard set the creator **declared onchain**.
+
+It does **not** prove that:
+
+- the declared hazard list is complete;
+- the system is safe in the real world;
+- an accepted mitigation has actually been implemented;
+- real-world operation matches the submitted text.
+
+`READINESS DECLARED` therefore means only that every **declared** hazard received sufficient consensus-reviewed mitigation coverage and the deterministic coverage equality was satisfied.
+
+## Local development
 
 ```bash
 npm install
@@ -88,59 +113,30 @@ npm run build
 npm run dev
 ```
 
-## Vercel
+The app defaults to the canonical deployment through `.env.example`:
 
-`vercel.json` proxies:
+```text
+VITE_CONTRACT_ADDRESS=0xFbF0a1890e8dAe6907B4DBC9Fbb023A3d13Edd8e
+```
+
+## Vercel proxy
+
+`vercel.json` maps:
 
 ```text
 /genlayer-rpc
 → https://studio.genlayer.com/api
 ```
 
-Optional environment variable:
+This keeps frontend reads same-origin while MetaMask handles writes.
+
+## Repository structure
 
 ```text
-VITE_CONTRACT_ADDRESS=0xFbF0a1890e8dAe6907B4DBC9Fbb023A3d13Edd8e
-```
-
-## Review status
-
-This package is intentionally **pre-publication**. The included
-`CLAUDE_FRONTEND_REVIEW.md` asks for an adversarial review of contract/frontend
-signature parity, RPC behavior, concurrency, owner authorization, state polling,
-replay UX, and deployment configuration.
-
-Do not treat the frontend as production-verified until local + Vercel testing
-has been completed.
-
-## Pre-review static checks
-
-See `PRE_REVIEW_CHECKS.md`.
-
-Current local/static result:
-
-```text
-TypeScript source syntax transpile: PASS
-Error normalizer regression suite: 58/58 PASS
-Full dependency-resolved build: still to be verified
-```
-
-## Claude frontend review fixes applied
-
-```text
-HIGH 1    Fixed — honest limitation is always visible in gate UI and README.
-HIGH 2    Fixed — runtime v1.1 schema guard; incompatible deployments disable writes.
-MEDIUM 1  Fixed — fresh get_config() is read immediately before create_system.
-MEDIUM 2  Fixed — created-id scan is capped at 50 ids.
-MEDIUM 3  Fixed — >50-attempt replay-window limitation is disclosed.
-MEDIUM 4  Fixed — wrong MetaMask chain is surfaced with a StudioNet switch action.
-LOW 3     Polished — READY wording changed to READINESS DECLARED / DECLARED.
-```
-
-Remaining MUST-VERIFY before public Vercel:
-
-```text
-- canonical 0xFbF0...Edd8e deployment exposes the expected v1.1 source/schema;
-- detect-then-block regression is repeated on that canonical deployment;
-- production /genlayer-rpc rewrite is verified in browser Network tools.
+contracts/   GenLayer Intelligent Contract
+public/      SafetyCase + GenLayer branding assets
+src/         React / TypeScript frontend
+tests/       Frontend regression tests
+README.md    Project overview
+TESTING.md   Reproducible test evidence
 ```
