@@ -200,7 +200,7 @@ function assertExpectedConfig(value: unknown): asserts value is GateConfig {
   const ok =
     Boolean(data) &&
     data?.name === 'SafetyCaseGate' &&
-    data?.version === '1.1' &&
+    data?.version === '1.2' &&
     typeof data?.min_hazards === 'number' &&
     data.min_hazards >= 2 &&
     typeof data?.max_hazards === 'number' &&
@@ -214,7 +214,7 @@ function assertExpectedConfig(value: unknown): asserts value is GateConfig {
   if (!ok) {
     throw new Error(
       `Contract at ${CONTRACT_ADDRESS} does not expose the expected ` +
-        `SafetyCaseGate v1.1 schema. Writes are disabled until the ` +
+        `SafetyCaseGate v1.2 schema. Writes are disabled until the ` +
         `deployment address is corrected.`,
     )
   }
@@ -239,7 +239,7 @@ function assertExpectedSystem(value: unknown): asserts value is SystemRecord {
   if (!ok) {
     throw new Error(
       `System state at ${CONTRACT_ADDRESS} is incompatible with the expected ` +
-        `SafetyCaseGate v1.1 schema (missing all_hazards_covered or related fields).`,
+        `SafetyCaseGate v1.2 schema (missing all_hazards_covered or related fields).`,
     )
   }
 }

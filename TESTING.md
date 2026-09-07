@@ -1,234 +1,307 @@
 # SafetyCase — Testing & Runtime Evidence
 
-This document separates **observed runtime evidence** from additional regression checks. It does not claim PASS for behavior that was not observed.
+This document separates the clean public project deployment from the deployment used for load-bearing runtime validation.
 
-## Canonical deployment
+## Frozen source identity
 
 ```text
-Contract: 0xFbF0a1890e8dAe6907B4DBC9Fbb023A3d13Edd8e
-Network: StudioNet 61999
-Version: 1.1
-Live dApp: https://safety-case-bice.vercel.app/
-Explorer: https://explorer-studio.genlayer.com/address/0xFbF0a1890e8dAe6907B4DBC9Fbb023A3d13Edd8e
+Project:                 SafetyCase
+Implementation:          SafetyCaseGate
+Public contract file:    contracts/SafetyCase.py
+Version:                 1.2
+Network:                 StudioNet 61999
+Frozen SHA256:           386a5f54a141c7a6010bd057308d1895aa2c8083d0f89348f41cb52f2f62edc1
 ```
 
-## Local bootstrap
+## Deployments
 
-```bash
-npm install
-npm test
-npm run build
-npm run dev
+### Clean project deployment
+
+```text
+0x463e2c0FEc2AD2251C7625B1C15d61E004395c09
 ```
 
-## Observed browser flow — System #1
+Explorer:
+https://explorer-studio.genlayer.com/address/0x463e2c0FEc2AD2251C7625B1C15d61E004395c09
 
-### TX1 — Create safety case
+Observed after deployment:
+
+```text
+name = SafetyCaseGate
+version = 1.2
+system_count = 0
+```
+
+Do not use this address for the historical runtime walkthrough; it is intentionally kept clean for the public project.
+
+### Runtime evidence deployment
+
+```text
+0xf1FBdC8FA38adEaf2b34c897afe8a3168fc0E6ED
+```
+
+Explorer:
+https://explorer-studio.genlayer.com/address/0xf1FBdC8FA38adEaf2b34c897afe8a3168fc0E6ED
+
+## R2 load-bearing runtime validation
+
+### T0 — Fresh configuration
+
+`get_config()` observed the R2 profile:
+
+```text
+name = SafetyCaseGate
+version = 1.2
+min_hazards = 2
+max_hazards = 8
+coverage_gate = covered_count == required_hazard_count
+prompt_inputs = HAZARD, MITIGATION
+system_purpose_enters_prompt = false
+global_admin = false
+clock_used = false
+system_count = 0
+mitigation_count = 0
+```
+
+**PASS**
+
+### T1 — Create immutable two-hazard system
 
 Purpose:
 
 ```text
-Autonomous treasury agent safety case - e894d20f
+Warehouse safety release gate.
 ```
 
 Hazards:
 
 ```text
-H1: The agent can send an irreversible payment to the wrong recipient.
-H2: The agent can write an API key into diagnostic logs.
+H1: A warehouse conveyor can restart while the physical guard door is open.
+H2: A pallet with an out-of-tolerance component can leave the dispatch bay.
 ```
 
-Observed after finalization:
+Initial System #1:
 
 ```text
-System #1
-required hazards: 2
-covered: 0
-open: 2
-mitigation attempts: 0
-release: not declared
+required_hazard_count = 2
+covered_count = 0
+open_count = 2
+gap_attempts = 0
+mitigation_count = 0
+all_hazards_covered = false
+release_ready = false
 ```
 
-**Result: PASS**
+**PASS**
 
-The frontend resolved the newly created system by owner + purpose + exact hazard set and loaded the correct workspace.
+### T2 — Weak mitigation remains SAFETY_GAP
 
-### TX2 — Weak mitigation for H1
-
-Submitted mitigation:
+H1 mitigation:
 
 ```text
-Record every payment in an audit log after the transfer is completed and notify an operator for later review.
+Every restart while the guard door is open is written to the safety event log and reported to the shift supervisor.
 ```
 
-Observed verdict/state:
+Observed:
 
 ```text
+covered_count = 0
+open_count = 2
+gap_attempts = 1
+mitigation_count = 1
+release_ready = false
+```
+
+H1 remained `OPEN`.
+
+**PASS**
+
+### T3 — Exact mitigation replay is a no-op
+
+Submitted the exact same H1 mitigation again.
+
+Observed state remained:
+
+```text
+covered_count = 0
+open_count = 2
+gap_attempts = 1
+mitigation_count = 1
+release_ready = false
+```
+
+No new mitigation record/counter was created.
+
+**PASS**
+
+### T4 — Preventive H1 mitigation covers the hazard
+
+Submitted:
+
+```text
+A hardwired interlock removes motor-enable power whenever the guard-door switch is open, and the conveyor cannot restart until the guard is closed.
+```
+
+Observed:
+
+```text
+covered_count = 1
+open_count = 1
+gap_attempts = 1
+mitigation_count = 2
+release_ready = false
+```
+
+**PASS**
+
+### T5 — Early release rolls back with no write
+
+Called:
+
+```text
+mark_release_ready(1)
+```
+
+at `1/2` coverage.
+
+Observed transaction:
+
+```text
+Consensus status: ACCEPTED
+Execution result: ERROR
+[rollback] All declared hazards must be COVERED before release
+```
+
+Post-state remained:
+
+```text
+covered_count = 1
+open_count = 1
+gap_attempts = 1
+mitigation_count = 2
+release_ready = false
+```
+
+This directly demonstrates that `ACCEPTED` is not equivalent to execution success.
+
+**PASS**
+
+### T6 — Preventive H2 mitigation completes coverage
+
+Submitted:
+
+```text
+Every pallet is measured at the dispatch gate, and any pallet outside tolerance is automatically diverted to a quarantine lane with no route to the dispatch bay.
+```
+
+Observed before final declaration:
+
+```text
+required_hazard_count = 2
+covered_count = 2
+open_count = 0
+gap_attempts = 1
+mitigation_count = 3
+all_hazards_covered = true
+release_ready = false
+```
+
+Full coverage does not automatically set release readiness.
+
+**PASS**
+
+### T7 — Deterministic release succeeds at full coverage
+
+Called:
+
+```text
+mark_release_ready(1)
+```
+
+Final observed state:
+
+```text
+required_hazard_count = 2
+covered_count = 2
+open_count = 0
+gap_attempts = 1
+mitigation_count = 3
+all_hazards_covered = true
+release_ready = true
+```
+
+**PASS**
+
+### T8 — Terminal release-ready protection
+
+After `release_ready = true`, attempted a different mitigation for H1:
+
+```text
+The operator performs an additional manual visual inspection before every conveyor restart.
+```
+
+Observed:
+
+```text
+Consensus status: ACCEPTED
+Execution result: ERROR
+[rollback] System is already release-ready
+```
+
+Post-state remained unchanged at `2/2`, `mitigation_count = 3`, `release_ready = true`.
+
+**PASS**
+
+## Source-path audit — malformed/provider/non-convergence
+
+The R2 source accepts only an exact semantic response containing one `verdict` field with one of:
+
+```text
+MITIGATION_SUFFICIENT
 SAFETY_GAP
-H1: OPEN
-H1 attempts: 1
-covered: 0/2
-history: 1
 ```
 
-**Result: PASS**
-
-The mitigation only records/reviews the payment after execution, so it does not prevent the stated hazard.
-
-### TX3 — Strong mitigation for H1
-
-Submitted mitigation:
+Source inspection confirms:
 
 ```text
-Before any irreversible payment is executed, the recipient address must match an approved allowlist entry and the payment must receive a second independent authorization. If either check fails, the transfer is blocked before execution.
+provider/runtime exception
+-> propagates; no semantic verdict
+
+non-dict / missing field / extra field / unknown verdict
+-> invalid sentinel
+-> validator rejection / invalid consensus result
+-> error before mitigation/history/counter writes
+
+non-convergence
+-> no semantic success
+-> no consequential write
 ```
 
-Observed verdict/state:
+These are source-path guarantees and are not presented as runtime-triggered evidence.
 
-```text
-MITIGATION_SUFFICIENT
-H1: COVERED
-H1 attempts: 2
-covered: 1/2
-history: 2
-```
+## Public dApp verification after deployment
 
-**Result: PASS**
-
-### TX4 — Strong mitigation for H2
-
-Submitted mitigation:
-
-```text
-Before diagnostic logging occurs, all API keys and other secrets are detected and redacted from log output. Any log entry containing an unredacted secret is blocked from being written.
-```
-
-Observed verdict/state:
-
-```text
-MITIGATION_SUFFICIENT
-H2: COVERED
-H2 attempts: 1
-covered: 2/2
-open: 0
-history: 3
-```
-
-**Result: PASS**
-
-### TX5 — Declare release readiness
-
-Before TX5, the deterministic gate showed:
-
-```text
-2/2 covered
-0 open
-GATE OPEN
-```
-
-After `mark_release_ready(1)` finalized:
-
-```text
-READINESS DECLARED
-Release: DECLARED
-2/2 covered
-0 open
-3 mitigation attempts
-```
-
-**Result: PASS**
-
-## Final append-only history
-
-Observed history for System #1:
-
-```text
-#1 H1 -> SAFETY_GAP
-#2 H1 -> MITIGATION_SUFFICIENT
-#3 H2 -> MITIGATION_SUFFICIENT
-```
-
-The earlier failed H1 attempt remains visible after H1 is later covered.
-
-**Result: PASS**
-
-## Live Vercel verification
-
-The production deployment at:
+Production URL:
 
 ```text
 https://safety-case-bice.vercel.app/
 ```
 
-was checked against the same canonical StudioNet contract.
-
-Observed:
+After deploying this exact project package, verify the following without writing to the clean project address:
 
 ```text
-MetaMask connection on StudioNet: PASS
-Live config version 1.1: PASS
-Contract address 0xFbF0...Edd8e: PASS
-Registry read: 1 system onchain
-Load System #1: PASS
-Overview final state: 2/2 + READINESS DECLARED
-Hazards: H1 COVERED, H2 COVERED
-History: 3 append-only attempts
-No undefined/NaN state observed
+StudioNet 61999 visible
+Project deployment = 0x463e...5c09
+Runtime evidence = 0xf1FB...E6ED
+Frozen source = 386a5f54...f2f62edc1
+Live config version = 1.2
+system_count = 0 on clean deployment
+creation form contains no preloaded demo values
+no undefined/NaN state
 ```
 
-No extra production write transaction was needed: the full write flow above had already been executed against the same canonical StudioNet contract through the local frontend.
-
-## Frontend behavior verified during the flow
-
-Observed through the successful flow:
-
-- MetaMask writes completed and state refreshed after finalization.
-- No duplicate write was required.
-- The app loaded the exact created System #1.
-- Covered hazards disabled further mitigation submission.
-- Release remained unavailable until 100% declared-hazard coverage.
-- `READINESS DECLARED` wording remained distinct from a real-world safety claim.
-- The live deployment could read StudioNet through `/genlayer-rpc`.
-
-## Additional regression checks
-
-These remain useful when changing frontend or contract code:
-
-### Wrong-chain handling
-
-Switch MetaMask away from StudioNet.
-
-Expected:
-
-```text
-visible wrong-chain warning
-Switch to StudioNet action available
-writes call ensureStudioChain()
-```
-
-### Exact replay
-
-Repeat an exact recent mitigation.
-
-Expected:
-
-```text
-frontend detects recent replay before MetaMask
-contract-level exact replay remains a no-op
-```
-
-### Incompatible schema
-
-Point the frontend at an older/incompatible deployment.
-
-Expected:
-
-```text
-clear v1.1 schema error
-writes disabled
-no undefined/NaN state treated as valid
-```
+For a new user walkthrough, create a separate stateful system only if submission review requires reproduction. The recorded runtime evidence above remains on the dedicated evidence deployment.
 
 ## Scope note
 
-A successful SafetyCase run proves coverage only for the hazards declared onchain. It does not prove that the declared list is complete or that accepted mitigations were implemented in the real world.
+A successful SafetyCase run proves coverage only for the hazards declared onchain. It does not prove that the declared list is complete, that accepted mitigations are implemented in the real world, or that the broader system is globally safe.

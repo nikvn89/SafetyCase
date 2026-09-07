@@ -549,6 +549,7 @@ textarea::placeholder, input::placeholder { color: #686276; }
 .config-list div { display: flex; justify-content: space-between; gap: 12px; font-size: 10px; }
 .config-list span { color: var(--muted); }
 .config-list b { color: #eee9f8; font-weight: 800; text-align: right; }
+.config-list a { color: #eee9f8; font-weight: 800; text-align: right; text-decoration: underline; text-underline-offset: 2px; }
 
 .release-btn {
   width: 100%;
@@ -641,7 +642,6 @@ textarea::placeholder, input::placeholder { color: #686276; }
   font-size: 11px;
   line-height: 1.5;
 }
-.preset-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
 .attempt-preview { margin-top: 18px; border-top: 1px solid var(--line-soft); padding-top: 14px; }
 .attempt-preview-head {

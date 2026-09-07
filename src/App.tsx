@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   CONTRACT_ADDRESS,
-  DEMO_HAZARDS,
-  DEMO_MITIGATIONS,
-  DEMO_PURPOSE_PREFIX,
+  FROZEN_SOURCE_SHA256,
+  RUNTIME_EVIDENCE_ADDRESS,
   EXPLORER_BASE,
   MAX_SYSTEM_PURPOSE_LENGTH,
 } from './config'
@@ -48,17 +47,11 @@ function shortAddress(value: string) {
   return `${value.slice(0, 6)}...${value.slice(-4)}`
 }
 
-function randomSuffix() {
-  try {
-    const bytes = new Uint8Array(4)
-    window.crypto.getRandomValues(bytes)
-    return Array.from(bytes)
-      .map((value) => value.toString(16).padStart(2, '0'))
-      .join('')
-  } catch {
-    return Math.random().toString(36).slice(2, 10)
-  }
+function shortHash(value: string) {
+  if (!value || value.length < 20) return value || '—'
+  return `${value.slice(0, 10)}...${value.slice(-8)}`
 }
+
 
 function normalizedHazards(values: string[]) {
   return values.map((value) => value.trim()).filter(Boolean)
@@ -120,10 +113,8 @@ function App() {
   const contractHref =
     `${EXPLORER_BASE}/address/${CONTRACT_ADDRESS}`
 
-  const generateDemo = useCallback(() => {
-    setPurpose(`${DEMO_PURPOSE_PREFIX} · ${randomSuffix()}`)
-    setDraftHazards([...DEMO_HAZARDS])
-  }, [])
+  const runtimeEvidenceHref =
+    `${EXPLORER_BASE}/address/${RUNTIME_EVIDENCE_ADDRESS}`
 
   const refreshConfig = useCallback(async () => {
     const next = await getConfig()
@@ -365,7 +356,7 @@ function App() {
   const validateNewSystem = () => {
     if (!account) return 'Connect MetaMask first.'
     if (!schemaOk) {
-      return 'Expected SafetyCaseGate v1.1 schema is not verified. Writes are disabled.'
+      return 'Expected SafetyCaseGate v1.2 schema is not verified. Writes are disabled.'
     }
 
     const nextPurpose = purpose.trim()
@@ -495,15 +486,6 @@ function App() {
     )
   }
 
-  const useMitigationPreset = (kind: 'weak' | 'strong' | 'redaction') => {
-    if (kind === 'weak') {
-      setMitigationText(DEMO_MITIGATIONS.weakPayment)
-    } else if (kind === 'strong') {
-      setMitigationText(DEMO_MITIGATIONS.strongPayment)
-    } else {
-      setMitigationText(DEMO_MITIGATIONS.apiRedaction)
-    }
-  }
 
   const handleSubmitMitigation = async () => {
     if (!account || !system || !config) {
@@ -513,7 +495,7 @@ function App() {
     if (!schemaOk) {
       setBanner({
         kind: 'error',
-        message: 'Expected SafetyCaseGate v1.1 schema is not verified. Writes are disabled.',
+        message: 'Expected SafetyCaseGate v1.2 schema is not verified. Writes are disabled.',
       })
       return
     }
@@ -648,7 +630,7 @@ function App() {
     if (!schemaOk) {
       setBanner({
         kind: 'error',
-        message: 'Expected SafetyCaseGate v1.1 schema is not verified. Writes are disabled.',
+        message: 'Expected SafetyCaseGate v1.2 schema is not verified. Writes are disabled.',
       })
       return
     }
@@ -931,7 +913,6 @@ function App() {
                       <h3>Fresh safety case</h3>
                       <p>Commit the complete hazard set at creation. It cannot be appended later.</p>
                     </div>
-                    <button className="ghost-btn" onClick={generateDemo}>New demo</button>
                   </div>
 
                   <label>
@@ -939,7 +920,7 @@ function App() {
                     <textarea
                       value={purpose}
                       onChange={(event) => setPurpose(event.target.value)}
-                      placeholder="e.g. Autonomous treasury agent safety case."
+                      placeholder="Describe the system boundary or release context."
                       rows={2}
                     />
                   </label>
@@ -1017,6 +998,18 @@ function App() {
                       <div><span>Purpose in prompt</span><b>{config ? String(config.system_purpose_enters_prompt).toUpperCase() : '—'}</b></div>
                       <div><span>Global admin</span><b>{config ? String(config.global_admin).toUpperCase() : '—'}</b></div>
                       <div><span>Clock</span><b>{config ? String(config.clock_used).toUpperCase() : '—'}</b></div>
+                      <div>
+                        <span>Project deployment</span>
+                        <a href={contractHref} target="_blank" rel="noreferrer">{shortAddress(CONTRACT_ADDRESS)} ↗</a>
+                      </div>
+                      <div>
+                        <span>Runtime evidence</span>
+                        <a href={runtimeEvidenceHref} target="_blank" rel="noreferrer">{shortAddress(RUNTIME_EVIDENCE_ADDRESS)} ↗</a>
+                      </div>
+                      <div>
+                        <span>Frozen source</span>
+                        <b title={FROZEN_SOURCE_SHA256}>{shortHash(FROZEN_SOURCE_SHA256)}</b>
+                      </div>
                     </div>
                   </div>
 
@@ -1128,12 +1121,6 @@ function App() {
                         disabled={selectedHazardRecord?.status === 'COVERED'}
                       />
                     </label>
-
-                    <div className="preset-row">
-                      <button className="mini-btn" onClick={() => useMitigationPreset('weak')}>Weak logging demo</button>
-                      <button className="mini-btn" onClick={() => useMitigationPreset('strong')}>Strong payment demo</button>
-                      <button className="mini-btn" onClick={() => useMitigationPreset('redaction')}>Redaction demo</button>
-                    </div>
 
                     <button
                       className="primary-btn full"
