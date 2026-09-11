@@ -3,17 +3,22 @@
 from genlayer import *
 from dataclasses import dataclass
 import json
+import re
 
 
 MITIGATION_SUFFICIENT = "MITIGATION_SUFFICIENT"
 SAFETY_GAP = "SAFETY_GAP"
 
 HAZARD_OPEN = "OPEN"
+HAZARD_PENDING = "PENDING_COUNTERSIGNATURE"
 HAZARD_COVERED = "COVERED"
 
 MAX_SYSTEM_PURPOSE_LENGTH = 1000
 MAX_HAZARD_LENGTH = 1200
 MAX_MITIGATION_LENGTH = 1200
+MAX_CHALLENGE_LENGTH = 1200
+MAX_ATTEMPTS_PER_HAZARD = 5
+MAX_LIFETIME_ATTEMPTS_PER_HAZARD = 15
 MIN_HAZARDS = 2
 MAX_HAZARDS = 8
 MAX_PAGE_SIZE = 50
@@ -23,12 +28,15 @@ MAX_PAGE_SIZE = 50
 @dataclass
 class SystemRecord:
     owner: Address
+    reviewer: Address
     system_purpose: str
     required_hazard_count: u256
     covered_count: u256
     gap_attempts: u256
     mitigation_count: u256
+    challenge_count: u256
     release_ready: bool
+    released_by: Address
 
 
 @allow_storage
@@ -39,7 +47,9 @@ class HazardRecord:
     text: str
     status: str
     covered_by: u256
+    pending_mitigation_id: u256
     attempt_count: u256
+    lifetime_attempt_count: u256
 
 
 @allow_storage
@@ -48,7 +58,19 @@ class MitigationRecord:
     system_id: u256
     hazard_index: u256
     text: str
+    evidence_digest: str
     verdict: str
+
+
+@allow_storage
+@dataclass
+class ChallengeRecord:
+    system_id: u256
+    hazard_index: u256
+    mitigation_id: u256
+    previous_status: str
+    reason: str
+    challenged_by: Address
 
 
 class SafetyCaseGate(gl.Contract):
@@ -61,7 +83,9 @@ class SafetyCaseGate(gl.Contract):
 
     The contract's distinguishing consequence is the deterministic coverage
     invariant over an immutable hazard set: all declared hazards must be
-    irreversibly COVERED before release readiness can be declared.
+    reviewer-countersigned as COVERED before release readiness can be declared.
+    COVERED is revocable by the authenticated reviewer through an auditable
+    challenge path, which deterministically closes release readiness again.
 
     Important scope:
     - the hazard set is immutable and complete only as DECLARED by the creator;
@@ -72,6 +96,7 @@ class SafetyCaseGate(gl.Contract):
 
     system_counter: u256
     mitigation_counter: u256
+    challenge_counter: u256
 
     systems: TreeMap[u256, SystemRecord]
 
@@ -91,11 +116,21 @@ class SafetyCaseGate(gl.Contract):
     # key "<system_id>:<hazard_index>:<keccak(mitigation)>" -> mitigation_id
     attempt_lookup: TreeMap[str, u256]
 
+    # evidence replay lock:
+    # key "<system_id>:<hazard_index>:<sha256-digest>" -> mitigation_id
+    # Same evidence cannot buy a new semantic roll by paraphrasing mitigation text.
+    evidence_lookup: TreeMap[str, u256]
+
+    # append-only reviewer challenge history
+    challenges: TreeMap[u256, ChallengeRecord]
+    system_challenge_index: TreeMap[str, u256]
+
 
     def __init__(self):
         # No deployer/global-admin privilege.
         self.system_counter = u256(0)
         self.mitigation_counter = u256(0)
+        self.challenge_counter = u256(0)
 
     # ========================================================
     # HELPERS
@@ -125,25 +160,49 @@ class SafetyCaseGate(gl.Contract):
             raise gl.vm.UserError("Mitigation is too long")
         return cleaned
 
+    def _clean_challenge_reason(self, text: str) -> str:
+        cleaned = text.strip()
+        if len(cleaned) == 0:
+            raise gl.vm.UserError("Challenge reason cannot be empty")
+        if len(cleaned) > MAX_CHALLENGE_LENGTH:
+            raise gl.vm.UserError("Challenge reason is too long")
+        return cleaned
+
+    def _clean_evidence_digest(self, digest_hex: str) -> str:
+        if not isinstance(digest_hex, str):
+            raise gl.vm.UserError("Evidence digest must be a hex string")
+        cleaned = digest_hex.strip().lower()
+        if cleaned.startswith("0x"):
+            cleaned = cleaned[2:]
+        if len(cleaned) != 64 or re.fullmatch(r"[0-9a-f]{64}", cleaned) is None:
+            raise gl.vm.UserError("Evidence digest must be a 32-byte SHA-256 hex digest")
+        return cleaned
+
     def _safe_prompt_text(self, text: str) -> str:
         # Stored text remains exact. Only the model-facing copy is sanitized.
-        cleaned = text
-        for token in (
-            "<HAZARD>",
-            "</HAZARD>",
-            "<MITIGATION>",
-            "</MITIGATION>",
-            MITIGATION_SUFFICIENT,
-            SAFETY_GAP,
-            "```",
-        ):
-            cleaned = cleaned.replace(token, " ")
+        # Angle brackets are removed generically so tag case/spacing variants
+        # cannot manufacture a second prompt boundary. Verdict labels are
+        # stripped case-insensitively from untrusted data.
+        cleaned = text.replace("<", " ").replace(">", " ").replace("```", " ")
+        cleaned = re.sub(
+            r"\b(?:MITIGATION[\s_\-]*SUFFICIENT|SAFETY[\s_\-]*GAP)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         return cleaned.strip()
+
+    def _hazard_dedupe_text(self, text: str) -> str:
+        normalized = re.sub(r"\s+", " ", text.strip().lower())
+        normalized = re.sub(r"[.!?,;:]+$", "", normalized).strip()
+        return normalized
 
     def _hash_text(self, text: str) -> str:
         return Keccak256(text.encode("utf-8")).hexdigest()
 
     def _require_system(self, system_id: int) -> u256:
+        if isinstance(system_id, bool):
+            raise gl.vm.UserError("Invalid system id")
         if system_id <= 0 or system_id > int(self.system_counter):
             raise gl.vm.UserError("Invalid system id")
         return u256(system_id)
@@ -178,12 +237,31 @@ class SafetyCaseGate(gl.Contract):
         )
 
 
+
+    def _evidence_lookup_key(
+        self,
+        system_id: u256,
+        hazard_index: int,
+        evidence_digest: str,
+    ) -> str:
+        return f"{int(system_id)}:{hazard_index}:{evidence_digest}"
+
+    def _system_challenge_index_key(
+        self,
+        system_id: u256,
+        challenge_index: int,
+    ) -> str:
+        return f"{int(system_id)}:{challenge_index}"
+
     def _get_hazard(
         self,
         system_id: u256,
         hazard_index: int,
     ) -> HazardRecord:
         system = self.systems[system_id]
+
+        if isinstance(hazard_index, bool):
+            raise gl.vm.UserError("Invalid hazard index")
 
         if (
             hazard_index <= 0
@@ -297,14 +375,16 @@ an unstated mechanism, or depends on assumptions not present in the committed
 text, return {SAFETY_GAP}.
 
 This is the recoverable branch: the system owner may propose another mitigation.
-A false SUFFICIENT verdict irreversibly covers the hazard and can contribute to
-opening the deterministic release-readiness gate.
+A SUFFICIENT semantic verdict does NOT cover the hazard by itself. It only creates
+a pending candidate that the separately authenticated reviewer must countersign
+before coverage changes. Coverage may later be challenged and revoked onchain.
 
 STRICT SCOPE
 - Use NO URLs, browsing, external evidence, system ids, wallet addresses,
   counters, or contract state.
 - Do NOT judge whether the hazard itself is likely.
 - Do NOT judge whether the described mitigation has actually been implemented.
+- Do NOT inspect or infer the evidence digest; it is an onchain binding for reviewer verification, not a model input.
 - Do NOT judge the overall completeness of the hazard list.
 - Do NOT judge the broader system purpose.
 - Judge only whether THIS mitigation is sufficient against THIS hazard.
@@ -433,8 +513,21 @@ or
         self,
         system_purpose: str,
         hazards_json: str,
+        reviewer_hex: str,
     ) -> None:
         purpose = self._clean_system_purpose(system_purpose)
+
+        try:
+            reviewer = Address(reviewer_hex.strip())
+        except Exception:
+            raise gl.vm.UserError("Invalid reviewer address")
+
+        if reviewer == gl.message.sender_address:
+            raise gl.vm.UserError("Reviewer must be a different wallet")
+
+        zero_address = Address("0x0000000000000000000000000000000000000000")
+        if reviewer == zero_address:
+            raise gl.vm.UserError("Reviewer cannot be the zero address")
 
         try:
             raw_hazards = json.loads(hazards_json)
@@ -460,7 +553,8 @@ or
                 raise gl.vm.UserError("Each hazard must be a string")
 
             hazard_text = self._clean_hazard(item)
-            hazard_hash = self._hash_text(hazard_text)
+            dedupe_text = self._hazard_dedupe_text(hazard_text)
+            hazard_hash = self._hash_text(dedupe_text)
 
             if hazard_hash in seen_hashes:
                 raise gl.vm.UserError("Duplicate hazard")
@@ -472,12 +566,15 @@ or
 
         self.systems[new_system_id] = SystemRecord(
             owner=gl.message.sender_address,
+            reviewer=reviewer,
             system_purpose=purpose,
             required_hazard_count=u256(len(cleaned_hazards)),
             covered_count=u256(0),
             gap_attempts=u256(0),
             mitigation_count=u256(0),
+            challenge_count=u256(0),
             release_ready=False,
+            released_by=Address("0x0000000000000000000000000000000000000000"),
         )
 
         index = 1
@@ -490,7 +587,9 @@ or
                 text=hazard_text,
                 status=HAZARD_OPEN,
                 covered_by=u256(0),
+                pending_mitigation_id=u256(0),
                 attempt_count=u256(0),
+                lifetime_attempt_count=u256(0),
             )
             index += 1
 
@@ -506,6 +605,7 @@ or
         system_id: int,
         hazard_index: int,
         mitigation_text: str,
+        evidence_digest_hex: str,
     ) -> None:
         sid = self._require_system(system_id)
         system = self.systems[sid]
@@ -522,22 +622,41 @@ or
 
         if hazard.status == HAZARD_COVERED:
             raise gl.vm.UserError("Hazard is already COVERED")
+        if hazard.status == HAZARD_PENDING:
+            raise gl.vm.UserError("A mitigation is awaiting countersignature")
 
         mitigation = self._clean_mitigation(mitigation_text)
+        evidence_digest = self._clean_evidence_digest(evidence_digest_hex)
 
-        # Exact replay: deterministic no-op, no AI call, no counters.
         replay_key = self._attempt_lookup_key(
             sid,
             hazard_index,
             mitigation,
         )
         if replay_key in self.attempt_lookup:
-            return
+            raise gl.vm.UserError("This exact mitigation was already attempted")
 
-        # No cross-system verdict cache.
-        # Each new exact hazard/mitigation attempt for this system reaches
-        # consensus, so the local append-only history faithfully records
-        # semantic grinding rather than laundering it through another system.
+        evidence_key = self._evidence_lookup_key(
+            sid,
+            hazard_index,
+            evidence_digest,
+        )
+        if evidence_key in self.evidence_lookup:
+            raise gl.vm.UserError(
+                "This evidence was already adjudicated for this hazard"
+            )
+
+        # Budget is checked before semantic consensus. A sixth distinct attempt
+        # cannot spend a model round.
+        if int(hazard.attempt_count) >= MAX_ATTEMPTS_PER_HAZARD:
+            raise gl.vm.UserError(
+                "Attempt budget for this hazard is exhausted"
+            )
+        if int(hazard.lifetime_attempt_count) >= MAX_LIFETIME_ATTEMPTS_PER_HAZARD:
+            raise gl.vm.UserError(
+                "Lifetime attempt ceiling for this hazard is reached"
+            )
+
         verdict = self._classify_mitigation(
             hazard.text,
             mitigation,
@@ -549,10 +668,12 @@ or
             system_id=sid,
             hazard_index=u256(hazard_index),
             text=mitigation,
+            evidence_digest=evidence_digest,
             verdict=verdict,
         )
 
         self.attempt_lookup[replay_key] = new_mitigation_id
+        self.evidence_lookup[evidence_key] = new_mitigation_id
 
         next_system_attempt = u256(int(system.mitigation_count) + 1)
         self.system_mitigation_index[
@@ -562,35 +683,168 @@ or
             )
         ] = new_mitigation_id
 
-        next_hazard_attempt = u256(int(hazard.attempt_count) + 1)
+        # Per-cycle attempts are reset by a reviewer challenge, while the
+        # lifetime ordinal remains monotonic so hazard history stays append-only.
+        next_cycle_attempt = u256(int(hazard.attempt_count) + 1)
+        next_lifetime_attempt = u256(int(hazard.lifetime_attempt_count) + 1)
         self.hazard_attempt_index[
             self._hazard_attempt_index_key(
                 sid,
                 hazard_index,
-                int(next_hazard_attempt),
+                int(next_lifetime_attempt),
             )
         ] = new_mitigation_id
 
         system.mitigation_count = next_system_attempt
-        hazard.attempt_count = next_hazard_attempt
+        hazard.attempt_count = next_cycle_attempt
+        hazard.lifetime_attempt_count = next_lifetime_attempt
 
         if verdict == MITIGATION_SUFFICIENT:
-            # One-way latch. Never un-cover this hazard in this system version.
-            hazard.status = HAZARD_COVERED
-            hazard.covered_by = new_mitigation_id
-            system.covered_count = u256(int(system.covered_count) + 1)
+            # Semantic output cannot cover a hazard. It only creates a candidate
+            # bound to immutable mitigation text + evidence digest.
+            hazard.status = HAZARD_PENDING
+            hazard.pending_mitigation_id = new_mitigation_id
         else:
             system.gap_attempts = u256(int(system.gap_attempts) + 1)
 
-        self.hazards[
-            self._hazard_key(sid, hazard_index)
-        ] = hazard
+        self.hazards[self._hazard_key(sid, hazard_index)] = hazard
         self.systems[sid] = system
-
         self.mitigation_counter = new_mitigation_id
 
     # ========================================================
-    # WRITE 3 — DETERMINISTIC AND-GATE
+    # WRITE 3 — AUTHENTICATED REVIEWER COUNTERSIGNATURE
+    # ========================================================
+
+    @gl.public.write
+    def countersign_mitigation(
+        self,
+        system_id: int,
+        hazard_index: int,
+    ) -> None:
+        sid = self._require_system(system_id)
+        system = self.systems[sid]
+
+        if gl.message.sender_address != system.reviewer:
+            raise gl.vm.UserError("Only the reviewer may countersign")
+
+        hazard = self._get_hazard(sid, hazard_index)
+        if hazard.status != HAZARD_PENDING:
+            raise gl.vm.UserError("No mitigation is awaiting countersignature")
+
+        pending_id = hazard.pending_mitigation_id
+        if int(pending_id) <= 0:
+            raise gl.vm.UserError("No mitigation is awaiting countersignature")
+
+        hazard.status = HAZARD_COVERED
+        hazard.covered_by = pending_id
+        hazard.pending_mitigation_id = u256(0)
+        system.covered_count = u256(int(system.covered_count) + 1)
+
+        self.hazards[self._hazard_key(sid, hazard_index)] = hazard
+        self.systems[sid] = system
+
+    # ========================================================
+    # WRITE 4 — REVIEWER CHALLENGE / REVOCATION
+    # ========================================================
+
+    @gl.public.write
+    def challenge_coverage(
+        self,
+        system_id: int,
+        hazard_index: int,
+        reason_text: str,
+    ) -> None:
+        sid = self._require_system(system_id)
+        system = self.systems[sid]
+
+        if gl.message.sender_address != system.reviewer:
+            raise gl.vm.UserError("Only the reviewer may challenge coverage")
+
+        hazard = self._get_hazard(sid, hazard_index)
+        if hazard.status not in (HAZARD_COVERED, HAZARD_PENDING):
+            raise gl.vm.UserError("Hazard has no coverage to challenge")
+
+        reason = self._clean_challenge_reason(reason_text)
+        previous_status = hazard.status
+        target_id = (
+            hazard.covered_by
+            if previous_status == HAZARD_COVERED
+            else hazard.pending_mitigation_id
+        )
+
+        if previous_status == HAZARD_COVERED:
+            if int(system.covered_count) <= 0:
+                raise gl.vm.UserError("Invalid covered count")
+            system.covered_count = u256(int(system.covered_count) - 1)
+
+        hazard.status = HAZARD_OPEN
+        hazard.covered_by = u256(0)
+        hazard.pending_mitigation_id = u256(0)
+        hazard.attempt_count = u256(0)
+        system.release_ready = False
+        system.released_by = Address("0x0000000000000000000000000000000000000000")
+
+        new_challenge_id = u256(int(self.challenge_counter) + 1)
+        self.challenges[new_challenge_id] = ChallengeRecord(
+            system_id=sid,
+            hazard_index=u256(hazard_index),
+            mitigation_id=target_id,
+            previous_status=previous_status,
+            reason=reason,
+            challenged_by=gl.message.sender_address,
+        )
+
+        next_system_challenge = u256(int(system.challenge_count) + 1)
+        self.system_challenge_index[
+            self._system_challenge_index_key(
+                sid,
+                int(next_system_challenge),
+            )
+        ] = new_challenge_id
+        system.challenge_count = next_system_challenge
+
+        self.hazards[self._hazard_key(sid, hazard_index)] = hazard
+        self.systems[sid] = system
+        self.challenge_counter = new_challenge_id
+
+    # ========================================================
+    # WRITE 5 — REVIEWER-GRANTED RETRY CYCLE
+    # ========================================================
+
+    @gl.public.write
+    def reopen_attempts(self, system_id: int, hazard_index: int) -> None:
+        """Reviewer grants the owner a fresh retry cycle on an OPEN hazard.
+
+        challenge_coverage only accepts COVERED/PENDING, so a hazard whose five
+        cycle attempts all returned SAFETY_GAP has no reset trigger and its
+        remaining lifetime budget is unreachable. This is that trigger. It is
+        deterministic, makes no model call, and cannot exceed the lifetime
+        ceiling, so it restores liveness without reopening unbounded grinding.
+        """
+        sid = self._require_system(system_id)
+        system = self.systems[sid]
+
+        if gl.message.sender_address != system.reviewer:
+            raise gl.vm.UserError("Only the reviewer may reopen attempts")
+
+        hazard = self._get_hazard(sid, hazard_index)
+
+        if hazard.status != HAZARD_OPEN:
+            raise gl.vm.UserError("Only an OPEN hazard can be reopened")
+
+        if int(hazard.attempt_count) < MAX_ATTEMPTS_PER_HAZARD:
+            raise gl.vm.UserError("Attempt cycle is not exhausted")
+
+        if int(hazard.lifetime_attempt_count) >= MAX_LIFETIME_ATTEMPTS_PER_HAZARD:
+            raise gl.vm.UserError(
+                "Lifetime attempt ceiling for this hazard is reached"
+            )
+
+        hazard.attempt_count = u256(0)
+        self.hazards[self._hazard_key(sid, hazard_index)] = hazard
+
+    # ========================================================
+    # WRITE 6 — DETERMINISTIC AND-GATE
     # ========================================================
 
     @gl.public.write
@@ -599,7 +853,7 @@ or
         system = self.systems[sid]
 
         if system.release_ready:
-            return
+            raise gl.vm.UserError("System is already release-ready")
 
         if int(system.covered_count) != int(system.required_hazard_count):
             raise gl.vm.UserError(
@@ -609,6 +863,7 @@ or
         # Permissionless deterministic finalization.
         # No AI call here; no participant can block a fully covered system.
         system.release_ready = True
+        system.released_by = gl.message.sender_address
         self.systems[sid] = system
 
     # ========================================================
@@ -619,19 +874,27 @@ or
     def get_config(self):
         return {
             "name": "SafetyCaseGate",
-            "version": "1.2",
+            "version": "2.0",
             "semantic_verdicts": [
                 MITIGATION_SUFFICIENT,
                 SAFETY_GAP,
             ],
             "hazard_statuses": [
                 HAZARD_OPEN,
+                HAZARD_PENDING,
                 HAZARD_COVERED,
             ],
             "min_hazards": MIN_HAZARDS,
             "max_hazards": MAX_HAZARDS,
             "max_hazard_length": MAX_HAZARD_LENGTH,
             "max_mitigation_length": MAX_MITIGATION_LENGTH,
+            "max_challenge_length": MAX_CHALLENGE_LENGTH,
+            "max_attempts_per_hazard": MAX_ATTEMPTS_PER_HAZARD,
+            "max_lifetime_attempts_per_hazard": MAX_LIFETIME_ATTEMPTS_PER_HAZARD,
+            "reviewer_required": True,
+            "challenge_enabled": True,
+            "evidence_binding": "sha256_digest_per_mitigation",
+            "same_evidence_reroll_blocked": True,
             "prompt_inputs": [
                 "HAZARD",
                 "MITIGATION",
@@ -642,6 +905,7 @@ or
             "clock_used": False,
             "system_count": int(self.system_counter),
             "mitigation_count": int(self.mitigation_counter),
+            "challenge_count": int(self.challenge_counter),
         }
 
     @gl.public.view
@@ -649,22 +913,35 @@ or
         sid = self._require_system(system_id)
         system = self.systems[sid]
 
+        open_count = 0
+        pending_count = 0
+        index = 1
+        while index <= int(system.required_hazard_count):
+            hazard = self._get_hazard(sid, index)
+            if hazard.status == HAZARD_OPEN:
+                open_count += 1
+            elif hazard.status == HAZARD_PENDING:
+                pending_count += 1
+            index += 1
+
         return {
             "system_id": int(sid),
             "owner": str(system.owner),
+            "reviewer": str(system.reviewer),
             "system_purpose": system.system_purpose,
             "required_hazard_count":
                 int(system.required_hazard_count),
             "covered_count": int(system.covered_count),
-            "open_count":
-                int(system.required_hazard_count)
-                - int(system.covered_count),
+            "open_count": open_count,
+            "pending_count": pending_count,
             "gap_attempts": int(system.gap_attempts),
             "mitigation_count": int(system.mitigation_count),
+            "challenge_count": int(system.challenge_count),
             "all_hazards_covered":
                 int(system.covered_count)
                 == int(system.required_hazard_count),
             "release_ready": system.release_ready,
+            "released_by": str(system.released_by),
         }
 
     @gl.public.view
@@ -682,7 +959,9 @@ or
             "text": hazard.text,
             "status": hazard.status,
             "covered_by": int(hazard.covered_by),
+            "pending_mitigation_id": int(hazard.pending_mitigation_id),
             "attempt_count": int(hazard.attempt_count),
+            "lifetime_attempt_count": int(hazard.lifetime_attempt_count),
         }
 
     @gl.public.view
@@ -716,7 +995,9 @@ or
                 "text": hazard.text,
                 "status": hazard.status,
                 "covered_by": int(hazard.covered_by),
+                "pending_mitigation_id": int(hazard.pending_mitigation_id),
                 "attempt_count": int(hazard.attempt_count),
+                "lifetime_attempt_count": int(hazard.lifetime_attempt_count),
             })
             index += 1
 
@@ -738,6 +1019,7 @@ or
             "system_id": int(record.system_id),
             "hazard_index": int(record.hazard_index),
             "text": record.text,
+            "evidence_digest": record.evidence_digest,
             "verdict": record.verdict,
         }
 
@@ -776,6 +1058,7 @@ or
                 "mitigation_id": mitigation_id,
                 "hazard_index": int(record.hazard_index),
                 "text": record.text,
+                "evidence_digest": record.evidence_digest,
                 "verdict": record.verdict,
             })
             index += 1
@@ -800,8 +1083,10 @@ or
             raise gl.vm.UserError("Invalid page size")
 
         results = []
+        # History is indexed by the monotonic lifetime ordinal, not the
+        # per-cycle retry counter that resets after a challenge.
         end = min(
-            int(hazard.attempt_count),
+            int(hazard.lifetime_attempt_count),
             from_index + count - 1,
         )
 
@@ -819,8 +1104,66 @@ or
                 "hazard_attempt_index": index,
                 "mitigation_id": mitigation_id,
                 "text": record.text,
+                "evidence_digest": record.evidence_digest,
                 "verdict": record.verdict,
             })
             index += 1
 
         return results
+
+    @gl.public.view
+    def get_challenge(self, challenge_id: int):
+        if isinstance(challenge_id, bool):
+            raise gl.vm.UserError("Invalid challenge id")
+        if challenge_id <= 0 or challenge_id > int(self.challenge_counter):
+            raise gl.vm.UserError("Invalid challenge id")
+
+        cid = u256(challenge_id)
+        record = self.challenges[cid]
+        return {
+            "challenge_id": challenge_id,
+            "system_id": int(record.system_id),
+            "hazard_index": int(record.hazard_index),
+            "mitigation_id": int(record.mitigation_id),
+            "previous_status": record.previous_status,
+            "reason": record.reason,
+            "challenged_by": str(record.challenged_by),
+        }
+
+    @gl.public.view
+    def get_challenges(
+        self,
+        system_id: int,
+        from_index: int,
+        count: int,
+    ):
+        sid = self._require_system(system_id)
+        system = self.systems[sid]
+
+        if isinstance(from_index, bool) or from_index <= 0:
+            raise gl.vm.UserError("Invalid starting challenge index")
+        if isinstance(count, bool) or count <= 0 or count > MAX_PAGE_SIZE:
+            raise gl.vm.UserError("Invalid page size")
+
+        results = []
+        end = min(
+            int(system.challenge_count),
+            from_index + count - 1,
+        )
+        index = from_index
+        while index <= end:
+            key = self._system_challenge_index_key(sid, index)
+            challenge_id = int(self.system_challenge_index[key])
+            record = self.challenges[u256(challenge_id)]
+            results.append({
+                "system_challenge_index": index,
+                "challenge_id": challenge_id,
+                "hazard_index": int(record.hazard_index),
+                "mitigation_id": int(record.mitigation_id),
+                "previous_status": record.previous_status,
+                "reason": record.reason,
+                "challenged_by": str(record.challenged_by),
+            })
+            index += 1
+        return results
+

@@ -1,307 +1,108 @@
-# SafetyCase — Testing & Runtime Evidence
+# SafetyCase v2.0 — testing
 
-This document separates the clean public project deployment from the deployment used for load-bearing runtime validation.
-
-## Frozen source identity
+## Deployment under test
 
 ```text
-Project:                 SafetyCase
-Implementation:          SafetyCaseGate
-Public contract file:    contracts/SafetyCase.py
-Version:                 1.2
-Network:                 StudioNet 61999
-Frozen SHA256:           386a5f54a141c7a6010bd057308d1895aa2c8083d0f89348f41cb52f2f62edc1
+Network: GenLayer StudioNet
+Contract: 0x26F508c59e7874dE289C8B8ae0F7937D229d621F
+Frozen source SHA-256: 27afc982cffd9f6abdb960a9bf7ec9de07714ca12a23dd16b21f224753abd06f
+Version: 2.0
 ```
 
-## Deployments
+The deployment transaction has been observed as `ACCEPTED`, with GenVM `SUCCESS` and consensus `Accepted`. That proves deployment success only; it does not replace runtime testing of the load-bearing v2 state machine.
 
-### Clean project deployment
+## Local exact-source gates
+
+```bash
+python -m py_compile contracts/SafetyCase.py scripts/*.py
+python scripts/check_contract_ast.py
+python scripts/test_contract_logic.py
+python scripts/fence_probe.py
+python scripts/mutation_matrix.py
+```
+
+Expected reviewed baseline:
 
 ```text
-0x463e2c0FEc2AD2251C7625B1C15d61E004395c09
+Core logic                26/26 PASS
+Prompt fence              0/18 bypasses
+Mutation matrix           17/17 caught
 ```
 
-Explorer:
-https://explorer-studio.genlayer.com/address/0x463e2c0FEc2AD2251C7625B1C15d61E004395c09
+## Real GenVM Direct Mode
 
-Observed after deployment:
+Use the pinned toolchain:
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+pytest -q tests/direct/
+```
+
+The frozen predeploy candidate was independently exercised under `genlayer-test==0.29.2`, `GENVM_VERSION=v0.2.12`, and `genvm-linter==0.11.0` with 89 checks and 0 failures. The suite includes cycle/lifetime retry bounds, malicious-reviewer behavior, role isolation, replay/evidence locks, challenge liveness, `reopen_attempts`, append-only history, mutation guards, and a 400-operation invariant fuzz.
+
+## Frontend v2 checks
+
+```bash
+npm ci
+npm run build
+npm test
+```
+
+The frontend must verify `get_config()` reports:
 
 ```text
 name = SafetyCaseGate
-version = 1.2
-system_count = 0
+version = 2.0
+reviewer_required = true
+challenge_enabled = true
+max_attempts_per_hazard = 5
+max_lifetime_attempts_per_hazard = 15
+evidence_binding = sha256_digest_per_mitigation
+same_evidence_reroll_blocked = true
+PENDING_COUNTERSIGNATURE present in hazard_statuses
 ```
 
-Do not use this address for the historical runtime walkthrough; it is intentionally kept clean for the public project.
+Wallet connection must not invoke `wallet_getSnaps`, `wallet_requestSnaps`, or `client.connect('studionet')`.
 
-### Runtime evidence deployment
+## Required StudioNet runtime path before resubmission
+
+Use at least two distinct wallets:
 
 ```text
-0xf1FBdC8FA38adEaf2b34c897afe8a3168fc0E6ED
+Wallet A = owner
+Wallet B = reviewer
 ```
 
-Explorer:
-https://explorer-studio.genlayer.com/address/0xf1FBdC8FA38adEaf2b34c897afe8a3168fc0E6ED
+A third outsider wallet is recommended for one role-refusal transaction.
 
-## R2 load-bearing runtime validation
+Run a fresh system with at least two hazards. Capture transaction hashes and finalized post-state for this path:
 
-### T0 — Fresh configuration
+1. Wallet A creates a system with Wallet B as reviewer. Confirm both hazards are `OPEN`, `covered_count=0`, and both retry counters start at zero.
+2. Attempt a create with reviewer == owner and preserve the on-chain refusal evidence.
+3. Wallet A submits a weak mitigation with a fresh SHA-256 digest. Confirm `SAFETY_GAP`; hazard remains `OPEN`; cycle/lifetime each increment exactly once.
+4. Wallet A submits a strong mitigation with a different fresh digest. Confirm `MITIGATION_SUFFICIENT` produces `PENDING_COUNTERSIGNATURE`, not `COVERED`, and `covered_count` remains unchanged.
+5. From a non-reviewer wallet, call `countersign_mitigation` and preserve the refusal evidence.
+6. Wallet B countersigns. Confirm the hazard becomes `COVERED` and `covered_count` increments.
+7. Cover the second hazard through submit + reviewer countersign.
+8. Call `mark_release_ready`. Confirm `release_ready=true` only after both hazards are COVERED.
+9. Wallet B challenges hazard 1. Confirm `COVERED -> OPEN`, `covered_count` decrements, challenge history grows, and `release_ready` becomes `false`.
+10. Exercise the cycle bound on an OPEN hazard until `attempt_count=5` while lifetime remains below 15. Confirm a sixth semantic attempt is refused before another classification.
+11. Wallet B calls `reopen_attempts`. Confirm cycle becomes `0/5`, lifetime is unchanged, and old text/evidence digests remain unusable.
+12. Submit fresh text + fresh evidence, reach PENDING, countersign again, and confirm the system can recover to complete coverage.
 
-`get_config()` observed the R2 profile:
+### Evidence wording
 
-```text
-name = SafetyCaseGate
-version = 1.2
-min_hazards = 2
-max_hazards = 8
-coverage_gate = covered_count == required_hazard_count
-prompt_inputs = HAZARD, MITIGATION
-system_purpose_enters_prompt = false
-global_admin = false
-clock_used = false
-system_count = 0
-mitigation_count = 0
-```
+Use this wording when describing the evidence mechanism:
 
-**PASS**
+> The mitigation is bound to an immutable SHA-256 identity of an evidence artifact, and a separately authenticated reviewer must verify that artifact off-chain before countersigning. The digest also prevents the same artifact from purchasing another semantic roll on the same hazard.
 
-### T1 — Create immutable two-hazard system
+Do not say the contract verifies, validates, fetches, or proves the evidence artifact.
 
-Purpose:
+## dApp refusal-path rule
 
-```text
-Warehouse safety release gate.
-```
+The UI may forecast a likely refusal, but must not suppress a structurally buildable write merely because the connected role or current contract state looks invalid. This allows a reviewer/steward to exercise and observe the contract's own role and state gates.
 
-Hazards:
-
-```text
-H1: A warehouse conveyor can restart while the physical guard door is open.
-H2: A pallet with an out-of-tolerance component can leave the dispatch bay.
-```
-
-Initial System #1:
-
-```text
-required_hazard_count = 2
-covered_count = 0
-open_count = 2
-gap_attempts = 0
-mitigation_count = 0
-all_hazards_covered = false
-release_ready = false
-```
-
-**PASS**
-
-### T2 — Weak mitigation remains SAFETY_GAP
-
-H1 mitigation:
-
-```text
-Every restart while the guard door is open is written to the safety event log and reported to the shift supervisor.
-```
-
-Observed:
-
-```text
-covered_count = 0
-open_count = 2
-gap_attempts = 1
-mitigation_count = 1
-release_ready = false
-```
-
-H1 remained `OPEN`.
-
-**PASS**
-
-### T3 — Exact mitigation replay is a no-op
-
-Submitted the exact same H1 mitigation again.
-
-Observed state remained:
-
-```text
-covered_count = 0
-open_count = 2
-gap_attempts = 1
-mitigation_count = 1
-release_ready = false
-```
-
-No new mitigation record/counter was created.
-
-**PASS**
-
-### T4 — Preventive H1 mitigation covers the hazard
-
-Submitted:
-
-```text
-A hardwired interlock removes motor-enable power whenever the guard-door switch is open, and the conveyor cannot restart until the guard is closed.
-```
-
-Observed:
-
-```text
-covered_count = 1
-open_count = 1
-gap_attempts = 1
-mitigation_count = 2
-release_ready = false
-```
-
-**PASS**
-
-### T5 — Early release rolls back with no write
-
-Called:
-
-```text
-mark_release_ready(1)
-```
-
-at `1/2` coverage.
-
-Observed transaction:
-
-```text
-Consensus status: ACCEPTED
-Execution result: ERROR
-[rollback] All declared hazards must be COVERED before release
-```
-
-Post-state remained:
-
-```text
-covered_count = 1
-open_count = 1
-gap_attempts = 1
-mitigation_count = 2
-release_ready = false
-```
-
-This directly demonstrates that `ACCEPTED` is not equivalent to execution success.
-
-**PASS**
-
-### T6 — Preventive H2 mitigation completes coverage
-
-Submitted:
-
-```text
-Every pallet is measured at the dispatch gate, and any pallet outside tolerance is automatically diverted to a quarantine lane with no route to the dispatch bay.
-```
-
-Observed before final declaration:
-
-```text
-required_hazard_count = 2
-covered_count = 2
-open_count = 0
-gap_attempts = 1
-mitigation_count = 3
-all_hazards_covered = true
-release_ready = false
-```
-
-Full coverage does not automatically set release readiness.
-
-**PASS**
-
-### T7 — Deterministic release succeeds at full coverage
-
-Called:
-
-```text
-mark_release_ready(1)
-```
-
-Final observed state:
-
-```text
-required_hazard_count = 2
-covered_count = 2
-open_count = 0
-gap_attempts = 1
-mitigation_count = 3
-all_hazards_covered = true
-release_ready = true
-```
-
-**PASS**
-
-### T8 — Terminal release-ready protection
-
-After `release_ready = true`, attempted a different mitigation for H1:
-
-```text
-The operator performs an additional manual visual inspection before every conveyor restart.
-```
-
-Observed:
-
-```text
-Consensus status: ACCEPTED
-Execution result: ERROR
-[rollback] System is already release-ready
-```
-
-Post-state remained unchanged at `2/2`, `mitigation_count = 3`, `release_ready = true`.
-
-**PASS**
-
-## Source-path audit — malformed/provider/non-convergence
-
-The R2 source accepts only an exact semantic response containing one `verdict` field with one of:
-
-```text
-MITIGATION_SUFFICIENT
-SAFETY_GAP
-```
-
-Source inspection confirms:
-
-```text
-provider/runtime exception
--> propagates; no semantic verdict
-
-non-dict / missing field / extra field / unknown verdict
--> invalid sentinel
--> validator rejection / invalid consensus result
--> error before mitigation/history/counter writes
-
-non-convergence
--> no semantic success
--> no consequential write
-```
-
-These are source-path guarantees and are not presented as runtime-triggered evidence.
-
-## Public dApp verification after deployment
-
-Production URL:
-
-```text
-https://safety-case-bice.vercel.app/
-```
-
-After deploying this exact project package, verify the following without writing to the clean project address:
-
-```text
-StudioNet 61999 visible
-Project deployment = 0x463e...5c09
-Runtime evidence = 0xf1FB...E6ED
-Frozen source = 386a5f54...f2f62edc1
-Live config version = 1.2
-system_count = 0 on clean deployment
-creation form contains no preloaded demo values
-no undefined/NaN state
-```
-
-For a new user walkthrough, create a separate stateful system only if submission review requires reproduction. The recorded runtime evidence above remains on the dedicated evidence deployment.
-
-## Scope note
-
-A successful SafetyCase run proves coverage only for the hazards declared onchain. It does not prove that the declared list is complete, that accepted mitigations are implemented in the real world, or that the broader system is globally safe.
+All write controls use a mutation lock. One click must disable further write/navigation controls until the submitted write has either failed or its expected finalized postcondition has been checked.

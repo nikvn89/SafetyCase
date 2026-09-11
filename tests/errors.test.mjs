@@ -20,7 +20,7 @@ const cases = [
   ['MetaMask rejection nested in data',      { message: 'Internal JSON-RPC error.', data: { code: 4001, message: 'User rejected the request.' } }],
   ['unknown chain',                          { code: 4902, message: 'Unrecognized chain ID.' }],
   ['pending request',                        { code: -32002, message: 'Request already pending.' }],
-  ['snap unsupported',                       { code: -32601, message: 'The method does not exist.' }],
+  ['unsupported RPC method',                 { code: -32601, message: 'The method does not exist.' }],
   ['wallet internal error',                  { code: -32603, message: 'Internal error' }],
   ['bare object, no code/message',           { foo: 'bar' }],
   ['empty object',                           {} ],
@@ -44,7 +44,7 @@ for (const [name, thrown] of cases) {
 // Friendly copy for the codes this flow really produces.
 check('4001 -> friendly', normalizeError({ code: 4001, message: 'User rejected the request.' }).message.includes('rejected the request in your wallet'))
 check('4902 -> friendly', normalizeError({ code: 4902 }).message.includes('not added to your wallet'))
-check('-32601 -> friendly + says optional', normalizeError({ code: -32601 }).message.includes('optional'))
+check('-32601 -> friendly unsupported method', normalizeError({ code: -32601 }).message.includes('does not support the requested RPC method'))
 check('nested code is found', String(errorCode({ cause: { data: { originalError: { code: 4001 } } } })) === '4001')
 check('isUserRejection true for 4001', isUserRejection({ code: 4001 }) === true)
 check('isUserRejection false for 4902', isUserRejection({ code: 4902 }) === false)

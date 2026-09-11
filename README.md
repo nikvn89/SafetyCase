@@ -1,150 +1,110 @@
 # SafetyCase
 
-**Consensus-gated hazard coverage on GenLayer.**
+**Authenticated safety-case coverage for GenLayer.**
 
-SafetyCase lets a system owner commit an immutable set of declared hazards, submit one mitigation at a time for GenLayer semantic review, and cross a deterministic release-readiness gate only after every declared hazard is covered.
+SafetyCase v2.0 turns an immutable declared hazard set into a reviewer-controlled release gate. The owner proposes mitigations and GenLayer validators answer one narrow semantic question per hazard: whether the mitigation is sufficient for that declared hazard. A `MITIGATION_SUFFICIENT` verdict does **not** cover anything by itself; it creates `PENDING_COUNTERSIGNATURE`. Only the distinct reviewer wallet fixed at system creation can countersign the candidate into `COVERED`.
 
-## Project identity
+## Frozen StudioNet deployment
 
-- **Project / dApp:** SafetyCase
-- **Intelligent Contract implementation:** `SafetyCaseGate`
-- **Public contract file:** `contracts/SafetyCase.py`
-- **Contract version:** `1.2`
-- **Network:** StudioNet `61999`
-- **dApp:** https://safety-case-bice.vercel.app/
-- **GitHub:** https://github.com/nikvn89/SafetyCase
+- Contract: `0x26F508c59e7874dE289C8B8ae0F7937D229d621F`
+- Source: `contracts/SafetyCase.py`
+- Frozen SHA-256: `27afc982cffd9f6abdb960a9bf7ec9de07714ca12a23dd16b21f224753abd06f`
+- Contract version: `2.0`
+- Deployment screenshot: `evidence/00_v2_deployment_ACCEPTED_SUCCESS.png`
 
-### Clean project deployment
+The deployed source is frozen. Frontend work must not change the contract bytes.
 
-`0x463e2c0FEc2AD2251C7625B1C15d61E004395c09`
+## Why v2.0 is stronger
 
-Explorer:
-https://explorer-studio.genlayer.com/address/0x463e2c0FEc2AD2251C7625B1C15d61E004395c09
+### Authenticated second party
 
-This deployment is reserved for the public project and was left clean after deployment (`system_count = 0`).
+`create_system` stores a reviewer that must be non-zero and distinct from the owner. A semantic `MITIGATION_SUFFICIENT` result only creates a pending candidate. `countersign_mitigation` is reviewer-only and is the step that changes the hazard to `COVERED`.
 
-### Runtime evidence deployment
+### Evidence binding without overclaiming verification
 
-`0xf1FBdC8FA38adEaf2b34c897afe8a3168fc0E6ED`
+Each mitigation is bound to a 32-byte SHA-256 evidence digest. The digest makes the claimed artifact identity immutable and prevents the same artifact from purchasing another semantic roll on the same hazard. The contract does **not** fetch, validate, or prove that the artifact exists. The separately authenticated reviewer must verify that artifact off-chain before countersigning.
 
-Explorer:
-https://explorer-studio.genlayer.com/address/0xf1FBdC8FA38adEaf2b34c897afe8a3168fc0E6ED
+### Bounded retries
 
-### Frozen source
+Each hazard has:
 
-SHA256:
+- 5 semantic classifications per retry cycle;
+- 15 classifications over its lifetime;
+- exact mitigation-text replay blocking;
+- same-evidence-digest reroll blocking;
+- no additional submissions while a candidate is pending countersignature.
 
-`386a5f54a141c7a6010bd057308d1895aa2c8083d0f89348f41cb52f2f62edc1`
+If an OPEN hazard reaches 5/5 while still below 15/15, the reviewer may call `reopen_attempts`. This resets only the cycle counter; lifetime history and text/evidence locks stay intact.
 
-The clean project deployment, runtime evidence deployment, and `contracts/SafetyCase.py` use the same frozen R2 contract source.
+### Challenge and revocation
 
-## Core model
+The reviewer may call `challenge_coverage` on a PENDING or COVERED hazard. The hazard returns to `OPEN`. If the hazard was COVERED, `covered_count` is decremented, and any previously open `release_ready` gate is closed again. Challenges are append-only and queryable.
 
-SafetyCase separates semantic judgment from deterministic consequence:
+## Public write surface
 
-1. The creator freezes a complete hazard set at system creation.
-2. One semantic transaction evaluates exactly one committed `HAZARD + MITIGATION` pair.
-3. Validators may return only `MITIGATION_SUFFICIENT` or `SAFETY_GAP`.
-4. A sufficient mitigation irreversibly latches that hazard to `COVERED`; a gap remains `OPEN` and is preserved in append-only history.
-5. Release readiness is deterministic and can be declared only when:
+1. `create_system(system_purpose, hazards_json, reviewer_hex)`
+2. `submit_mitigation(system_id, hazard_index, mitigation_text, evidence_digest_hex)`
+3. `countersign_mitigation(system_id, hazard_index)`
+4. `challenge_coverage(system_id, hazard_index, reason_text)`
+5. `reopen_attempts(system_id, hazard_index)`
+6. `mark_release_ready(system_id)`
 
-```text
-covered_count == required_hazard_count
-```
+`mark_release_ready` is deterministic and permissionless. It succeeds only when `covered_count == required_hazard_count`.
 
-`mark_release_ready()` does not invoke semantic judgment.
+## Frontend v2.0
 
-## Authorization and replay protection
+The dApp exposes the complete v2 workflow:
 
-```text
-create_system       permissionless
-submit_mitigation   system owner only
-mark_release_ready  permissionless after full coverage
-```
+- owner + distinct reviewer at creation;
+- local SHA-256 hashing of an evidence file (the file never leaves the browser);
+- owner mitigation submission;
+- reviewer countersign;
+- reviewer challenge / revocation;
+- reviewer reopen of an exhausted OPEN retry cycle;
+- cycle `attempt_count / 5` and lifetime `lifetime_attempt_count / 15` side-by-side;
+- append-only mitigation and challenge audit trails;
+- source-address-SHA verification panel.
 
-Submitting the exact same mitigation text for the same system/hazard is a deterministic no-op before semantic evaluation, so the same attempt cannot be rerolled for a different verdict or counter increase.
+Contract rules are not duplicated as hard client-side blocks. The UI forecasts likely refusal in red, but structurally buildable calls remain submit-able so the on-chain role/state gates remain demonstrable. A synchronous UI mutation lock plus an RPC write guard prevents accidental double submission while a transaction is being processed and its finalized postcondition is checked.
 
-A covered hazard is a one-way latch. Once the system reaches `release_ready = true`, further mitigation submissions are rejected.
-
-## R2 runtime evidence
-
-The recorded StudioNet run used a two-hazard warehouse safety case and demonstrated:
-
-- fresh `get_config()` profile at version `1.2`;
-- immutable two-hazard system creation;
-- a weak H1 mitigation producing `SAFETY_GAP` while H1 remained `OPEN`;
-- exact mitigation replay with no new mitigation record or counter increment;
-- a preventive H1 mitigation producing `MITIGATION_SUFFICIENT` and `1/2` coverage;
-- premature `mark_release_ready(1)` producing execution `ERROR` / rollback while `release_ready` remained `false`;
-- a preventive H2 mitigation producing full `2/2` coverage while release readiness was still not automatically declared;
-- deterministic `mark_release_ready(1)` success only at full coverage;
-- terminal protection rejecting a new mitigation after `release_ready = true` with no state change.
-
-Final observed System #1 state on the runtime evidence deployment:
-
-```text
-required_hazard_count = 2
-covered_count = 2
-open_count = 0
-gap_attempts = 1
-mitigation_count = 3
-all_hazards_covered = true
-release_ready = true
-```
-
-The runtime also directly demonstrated that consensus status such as `ACCEPTED` is not treated as execution success: premature release and post-release mitigation calls reached consensus but had execution result `ERROR` and rolled back.
-
-## Semantic failure handling
-
-R2 does not coerce malformed model output into a safety verdict. The model-facing response must contain exactly one field with one of the two valid verdicts. Non-dict output, missing/extra fields, or unknown verdicts are rejected before mitigation/history/counter writes. Provider/runtime failures and non-convergence are likewise not converted into semantic success.
-
-These malformed/provider/non-convergence properties are source-path guarantees; the recorded runtime run did not add artificial production hooks solely to force those failures.
-
-## dApp behavior
-
-The frontend provides three views:
-
-```text
-Overview
-Hazards
-History
-```
-
-Reliability choices include:
-
-- StudioNet reads through same-origin `/genlayer-rpc`;
-- MetaMask for writes;
-- post-state confirmation instead of treating submission/finalization labels as success;
-- schema validation for `SafetyCaseGate v1.2` before writes;
-- exact recent mitigation replay detection before prompting the wallet;
-- owner-only mitigation controls;
-- a clean creation form with no preloaded demo hazards or mitigation presets;
-- live display of project deployment, runtime evidence deployment, and frozen source hash.
+The wallet flow uses standard EIP-1193 MetaMask methods (`eth_requestAccounts`, `eth_chainId`, `wallet_switchEthereumChain`, `wallet_addEthereumChain`) and does not request MetaMask Snaps.
 
 ## Honest scope
 
-SafetyCase proves deterministic coverage only over the immutable hazard set the creator **declared onchain**. It does not prove that the hazard list is complete, that a mitigation was implemented in the real world, that external evidence is authentic, or that the broader system is globally safe.
+- The declared hazard list is complete only as declared by the creator; SafetyCase does not discover undisclosed real-world hazards.
+- The SHA-256 digest is an immutable binding, not contract-side evidence verification.
+- The contract does not prove a mitigation was implemented in the real world.
+- The reviewer is chosen by the owner at creation and cannot be replaced. A reviewer who refuses every candidate can permanently prevent a hazard from reaching `COVERED`; this is an explicit consequence of requiring second-party consent.
+- Direct Mode is not StudioNet runtime proof. The deployed contract still needs live semantic/runtime evidence before final resubmission.
 
-`READINESS DECLARED` therefore means only that every declared hazard received sufficient consensus-reviewed mitigation coverage and the deterministic coverage equality was satisfied.
+## Local checks
 
-## Local development
+Frontend:
 
 ```bash
-npm install
-npm test
+npm ci
 npm run build
-npm run dev
+npm test
 ```
 
-The frontend defaults to the clean project deployment in `src/config.ts`. An optional valid `VITE_CONTRACT_ADDRESS` can override the project address for local development.
+Contract logic / hardening:
 
-## Repository structure
-
-```text
-contracts/SafetyCase.py   Frozen Intelligent Contract source
-public/                   SafetyCase + GenLayer branding assets
-src/                      React / TypeScript frontend
-tests/                    Frontend regression tests
-README.md                 Project overview
-TESTING.md                Runtime evidence and verification path
+```bash
+python -m py_compile contracts/SafetyCase.py scripts/*.py
+python scripts/check_contract_ast.py
+python scripts/test_contract_logic.py
+python scripts/fence_probe.py
+python scripts/mutation_matrix.py
 ```
+
+Real GenVM Direct Mode:
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+pytest -q tests/direct/
+```
+
+The reviewed frozen candidate passed 89 real-GenVM checks (74 shipped R1/R2 checks, 14 independent R2 probes, and a 400-operation invariant fuzz) before deployment. StudioNet runtime proof remains a separate required gate.

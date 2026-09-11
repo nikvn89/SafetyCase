@@ -1,0 +1,1 @@
+27afc982cffd9f6abdb960a9bf7ec9de07714ca12a23dd16b21f224753abd06f  contracts/SafetyCase.py
