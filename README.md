@@ -4,15 +4,18 @@
 
 SafetyCase v2.0 turns an immutable declared hazard set into a reviewer-controlled release gate. The owner proposes mitigations and GenLayer validators answer one narrow semantic question per hazard: whether the mitigation is sufficient for that declared hazard. A `MITIGATION_SUFFICIENT` verdict does **not** cover anything by itself; it creates `PENDING_COUNTERSIGNATURE`. Only the distinct reviewer wallet fixed at system creation can countersign the candidate into `COVERED`.
 
-## Frozen StudioNet deployment
+## Live deployment
 
-- Contract: `0x26F508c59e7874dE289C8B8ae0F7937D229d621F`
+- Live dApp: `https://safety-case-bice.vercel.app/`
+- StudioNet contract: `0x26F508c59e7874dE289C8B8ae0F7937D229d621F`
+- Explorer: `https://explorer-studio.genlayer.com/address/0x26F508c59e7874dE289C8B8ae0F7937D229d621F`
 - Source: `contracts/SafetyCase.py`
 - Frozen SHA-256: `27afc982cffd9f6abdb960a9bf7ec9de07714ca12a23dd16b21f224753abd06f`
 - Contract version: `2.0`
-- Deployment screenshot: `evidence/00_v2_deployment_ACCEPTED_SUCCESS.png`
+- Deployment evidence: `evidence/00_v2_deployment_ACCEPTED_SUCCESS.png`
+- StudioNet runtime evidence: `evidence/runtime-v2/`
 
-The deployed source is frozen. Frontend work must not change the contract bytes.
+The deployed source is frozen. Frontend or documentation work must not change the contract bytes.
 
 ## Why v2.0 is stronger
 
@@ -51,6 +54,28 @@ The reviewer may call `challenge_coverage` on a PENDING or COVERED hazard. The h
 
 `mark_release_ready` is deterministic and permissionless. It succeeds only when `covered_count == required_hazard_count`.
 
+## StudioNet runtime proof
+
+A full two-wallet live run was completed on **System #1** against the frozen deployment. The evidence index is `evidence/runtime-v2/EVIDENCE_INDEX.md`.
+
+Observed load-bearing path:
+
+- two-hazard system created with a distinct reviewer;
+- weak mitigation → `SAFETY_GAP` and OPEN;
+- strong mitigation → `PENDING_COUNTERSIGNATURE`, not COVERED;
+- owner attempted reviewer-only countersign → GenVM `ERROR / Rollback`, state unchanged;
+- reviewer countersign → COVERED;
+- second hazard driven through five GAP attempts → OPEN `5/5`, lifetime `5/15`;
+- reviewer reopen → OPEN `0/5`, lifetime still `5/15`;
+- fresh mitigation after reopen → PENDING, then reviewer countersign → 2/2 COVERED;
+- release readiness declared → READY;
+- reviewer challenge after release → COVERED→OPEN, coverage 2/2→1/2, release gate CLOSED;
+- fresh post-challenge mitigation + reviewer countersign → 2/2 COVERED again;
+- release readiness declared again → final READY state;
+- audit trail remained append-only across reopen and challenge.
+
+This is runtime proof of the tested state machine, not proof of external-world safety or evidence truth.
+
 ## Frontend v2.0
 
 The dApp exposes the complete v2 workflow:
@@ -69,13 +94,26 @@ Contract rules are not duplicated as hard client-side blocks. The UI forecasts l
 
 The wallet flow uses standard EIP-1193 MetaMask methods (`eth_requestAccounts`, `eth_chainId`, `wallet_switchEthereumChain`, `wallet_addEthereumChain`) and does not request MetaMask Snaps.
 
+## Exact reviewer inspection path
+
+For the existing runtime case:
+
+1. Open the live dApp.
+2. Connect any StudioNet wallet.
+3. `Overview` → enter System ID `1` → **Load finalized state**.
+4. `Mitigate` → inspect H1/H2 current coverage and counters.
+5. `Audit trail` → inspect attempts #1–#9 and Challenge #1.
+6. `Verification` → verify exact contract address, frozen SHA-256 and honest-scope statements.
+
+For a fresh active test, follow `TESTING.md` and create a new system rather than mutating System #1.
+
 ## Honest scope
 
 - The declared hazard list is complete only as declared by the creator; SafetyCase does not discover undisclosed real-world hazards.
 - The SHA-256 digest is an immutable binding, not contract-side evidence verification.
 - The contract does not prove a mitigation was implemented in the real world.
 - The reviewer is chosen by the owner at creation and cannot be replaced. A reviewer who refuses every candidate can permanently prevent a hazard from reaching `COVERED`; this is an explicit consequence of requiring second-party consent.
-- Direct Mode is not StudioNet runtime proof. The deployed contract still needs live semantic/runtime evidence before final resubmission.
+- StudioNet runtime evidence demonstrates the tested contract transitions and refusal behavior; it does not prove external-world safety facts.
 
 ## Local checks
 
@@ -107,4 +145,4 @@ pip install -r requirements.txt
 pytest -q tests/direct/
 ```
 
-The reviewed frozen candidate passed 89 real-GenVM checks (74 shipped R1/R2 checks, 14 independent R2 probes, and a 400-operation invariant fuzz) before deployment. StudioNet runtime proof remains a separate required gate.
+The frozen candidate passed 89 real-GenVM checks before deployment, including independent probes and a 400-operation invariant fuzz. The subsequent StudioNet run above separately exercised the live semantic/runtime path.
