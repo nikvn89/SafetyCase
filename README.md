@@ -145,4 +145,4 @@ pip install -r requirements.txt
 pytest -q tests/direct/
 ```
 
-The frozen candidate passed 89 real-GenVM checks before deployment, including independent probes and a 400-operation invariant fuzz. The subsequent StudioNet run above separately exercised the live semantic/runtime path.
+The frozen candidate passed 89 real-GenVM checks before deployment, including adversarial probes and a 400-operation invariant fuzz. The subsequent StudioNet run above separately exercised the live semantic/runtime path.

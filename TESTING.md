@@ -42,7 +42,7 @@ pip install -r requirements.txt
 pytest -q tests/direct/
 ```
 
-The frozen predeploy candidate was independently exercised under `genlayer-test==0.29.2`, `GENVM_VERSION=v0.2.12`, and `genvm-linter==0.11.0` with 89 checks and 0 failures. The suite covers cycle/lifetime bounds, role isolation, replay/evidence locks, challenge liveness, `reopen_attempts`, append-only history, mutation guards, and invariant fuzzing.
+The frozen candidate was exercised under `genlayer-test==0.29.2`, `GENVM_VERSION=v0.2.12`, and `genvm-linter==0.11.0` with 89 checks and 0 failures. The suite covers cycle/lifetime bounds, role isolation, replay/evidence locks, challenge liveness, `reopen_attempts`, append-only history, mutation guards, and invariant fuzzing.
 
 ## Frontend checks
 
