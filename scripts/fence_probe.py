@@ -46,7 +46,7 @@ for i, payload in enumerate(vectors, 1):
     if escaped:
         bypasses.append((i, payload, sanitized))
 
-# Over-reach control from the independent review: ordinary prose must survive.
+# Over-reach control: ordinary prose must survive.
 control = "the mitigation is sufficient for now"
 control_sanitized = c._safe_prompt_text(control)
 if control not in control_sanitized:
