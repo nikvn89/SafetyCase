@@ -1,5 +1,5 @@
 """
-Independent adversarial probes of SafetyCase v2.0 under REAL GenVM Direct Mode
+Adversarial probes of SafetyCase v2.0 under REAL GenVM Direct Mode
 (genlayer-test 0.29.2, GENVM v0.2.12) — not the pack's local harness.
 """
 import json
@@ -280,7 +280,7 @@ def test_A4d_failed_consensus_does_not_spend_budget(sys1, direct_vm):
 
 
 # =====================================================================
-# A5 — prompt fence, independently probed
+# A5 — prompt fence regression probes
 # =====================================================================
 
 # Detector method: each payload embeds a unique marker immediately before the

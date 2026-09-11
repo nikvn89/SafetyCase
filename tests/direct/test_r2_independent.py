@@ -1,5 +1,5 @@
 """
-Independent probes of the NEW R2 surface (reopen_attempts) and of the
+Regression probes of the R2 surface (reopen_attempts) and of the
 invariants R2 claims about it. Written fresh, not derived from the pack.
 """
 import json
